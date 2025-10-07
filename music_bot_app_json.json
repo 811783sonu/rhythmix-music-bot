@@ -1,0 +1,56 @@
+{
+  "name": "Rhythmix X Music Bot",
+  "description": "A powerful Telegram music bot with voice chat support",
+  "repository": "https://github.com/yourusername/telegram-music-bot",
+  "logo": "https://img.icons8.com/color/96/000000/music.png",
+  "keywords": [
+    "telegram",
+    "bot",
+    "music",
+    "voice-chat",
+    "pyrogram",
+    "pytgcalls"
+  ],
+  "env": {
+    "API_ID": {
+      "description": "Your Telegram API ID from my.telegram.org",
+      "value": "20550203",
+      "required": true
+    },
+    "API_HASH": {
+      "description": "Your Telegram API Hash from my.telegram.org",
+      "value": "690778a70966c6f3f1fbacb96a49f360",
+      "required": true
+    },
+    "BOT_TOKEN": {
+      "description": "Your Bot Token from @BotFather",
+      "value": "8244422744:AAF0ZSEONT7YTpwKldhLGGpZO_tseXlnmYA",
+      "required": true
+    },
+    "BOT_NAME": {
+      "description": "Your bot's display name",
+      "value": "Rhythmix X Bot",
+      "required": false
+    },
+    "LOG_LEVEL": {
+      "description": "Logging level (DEBUG, INFO, WARNING, ERROR)",
+      "value": "INFO",
+      "required": false
+    }
+  },
+  "buildpacks": [
+    {
+      "url": "https://github.com/jonathanong/heroku-buildpack-ffmpeg-latest.git"
+    },
+    {
+      "url": "heroku/python"
+    }
+  ],
+  "formation": {
+    "worker": {
+      "quantity": 1,
+      "size": "free"
+    }
+  },
+  "stack": "heroku-22"
+}
