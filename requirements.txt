@@ -1,11 +1,9 @@
-pyrogram==2.0.106
-tgcrypto==1.2.5
-py-tgcalls==0.9.7
+pyrogram
+tgcrypto
+py-tgcalls
 yt-dlp
 aiohttp
-aiofiles
 python-dotenv
-psutil
-ffmpeg-python
+
 
 
