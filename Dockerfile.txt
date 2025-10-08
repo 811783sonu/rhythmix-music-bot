@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  musicbot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rhythmix-music-bot
+    environment:
+      - API_ID=${API_ID:-20550203}
+      - API_HASH=${API_HASH:-690778a70966c6f3f1fbacb96a49f360}
+      - BOT_TOKEN=${BOT_TOKEN:-8244422744:AAF0ZSEONT7YTpwKldhLGGpZO_tseXlnmYA}
+      - BOT_NAME=${BOT_NAME:-Rhythmix X Bot}
+      - PORT=${PORT:-8000}
+      - ENABLE_HEALTH_CHECK=${ENABLE_HEALTH_CHECK:-True}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ./downloads:/app/downloads
+      - ./logs:/app/logs
+    ports:
+      - "${PORT:-8000}:8000"
+    restart: unless-stopped
+    networks:
+      - musicbot-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  musicbot-network:
+    driver: bridge
+
+volumes:
+  downloads:
+  logs:

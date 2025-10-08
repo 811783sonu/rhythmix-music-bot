@@ -1,0 +1,21 @@
+﻿services:
+  - type: web
+    name: rhythmix-music-bot
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    envVars:
+      - key: API_ID
+        value: 20550203
+      - key: API_HASH
+        value: 690778a70966c6f3f1fbacb96a49f360
+      - key: BOT_TOKEN
+        value: 8244422744:AAF0ZSEONT7YTpwKldhLGGpZO_tseXlnmYA
+      - key: BOT_NAME
+        value: Rhythmix X Bot
+      - key: PORT
+        value: 8000
+      - key: ENABLE_HEALTH_CHECK
+        value: True
+    healthCheckPath: /health
+    autoDeploy: true
