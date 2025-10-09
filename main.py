@@ -437,12 +437,12 @@ async def main():
     # Create downloads directory
     os.makedirs("downloads", exist_ok=True)
     
-    # Start PyTgCalls
+    # Start health check server
+    await health_server.start()
+    
+    # Start PyTgCalls (this also starts the Pyrogram client)
     await pytgcalls.start()
     logger.info("PyTgCalls started!")
-    
-    # Start Pyrogram
-    await app.start()
     logger.info(f"{BOT_NAME} started successfully!")
     
     # Keep running
