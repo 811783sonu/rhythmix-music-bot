@@ -39,7 +39,7 @@ current_playing = {}
 start_time = datetime.now()
 bot_stats = {'chats': set(), 'users': set(), 'played': 0}
 
-# YT-DLP options with Android client to bypass bot detection
+# YT-DLP options - FIXED FOR BOT DETECTION
 ydl_opts = {
     'format': 'bestaudio/best',
     'outtmpl': 'downloads/%(id)s.%(ext)s',
@@ -49,6 +49,7 @@ ydl_opts = {
     'nocheckcertificate': True,
     'geo_bypass': True,
     'age_limit': None,
+    'cookiefile': 'cookies.txt',  # ✅ ADD YOUR COOKIES FILE HERE
     'extractor_args': {
         'youtube': {
             'player_client': ['android', 'web'],
@@ -56,7 +57,7 @@ ydl_opts = {
         }
     },
     'http_headers': {
-        'User-Agent': 'com.google.android.youtube/17.36.4 (Linux; U; Android 12; GB) gzip',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-us,en;q=0.5',
         'Sec-Fetch-Mode': 'navigate',
@@ -81,31 +82,51 @@ def is_admin(chat_id, user_id):
     return is_sudo(user_id)
 
 async def download_song(query):
-    """Download and extract audio info"""
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            if not query.startswith('http'):
-                query = f"ytsearch:{query}"
+    """Download and extract audio info - WITH RETRY AND DELAY"""
+    max_retries = 3
+    
+    for attempt in range(max_retries):
+        try:
+            # ✅ ADD DELAY BETWEEN REQUESTS
+            if attempt > 0:
+                await asyncio.sleep(3 * attempt)  # Wait 3, 6, 9 seconds
             
-            info = ydl.extract_info(query, download=False)
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                if not query.startswith('http'):
+                    query = f"ytsearch:{query}"
+                
+                info = ydl.extract_info(query, download=False)
+                
+                if 'entries' in info:
+                    info = info['entries'][0]
+                
+                audio_url = info['url']
+                title = info.get('title', 'Unknown')
+                duration = info.get('duration', 0)
+                thumbnail = info.get('thumbnail', '')
+                
+                return {
+                    'title': title,
+                    'duration': duration,
+                    'url': audio_url,
+                    'thumbnail': thumbnail
+                }
+                
+        except Exception as e:
+            logger.error(f"Download error (attempt {attempt + 1}/{max_retries}): {e}")
             
-            if 'entries' in info:
-                info = info['entries'][0]
-            
-            audio_url = info['url']
-            title = info.get('title', 'Unknown')
-            duration = info.get('duration', 0)
-            thumbnail = info.get('thumbnail', '')
-            
-            return {
-                'title': title,
-                'duration': duration,
-                'url': audio_url,
-                'thumbnail': thumbnail
-            }
-    except Exception as e:
-        logger.error(f"Download error: {e}")
-        return None
+            # Check if it's bot detection error
+            if "Sign in to confirm" in str(e):
+                if attempt < max_retries - 1:
+                    logger.info(f"Bot detection triggered. Retrying in {3 * (attempt + 1)} seconds...")
+                    continue
+                else:
+                    logger.error("Failed after all retries due to bot detection!")
+                    return None
+            else:
+                return None
+    
+    return None
 
 async def fetch_lyrics(song_name):
     """Fetch lyrics"""
@@ -179,29 +200,32 @@ async def stream_end_handler(client, update):
 
 @app.on_message(filters.command("start"))
 async def start_command(client, message: Message):
-    """Start command"""
+    """Start command with beautiful interface"""
     bot_stats['users'].add(message.from_user.id)
     if message.chat.type != "private":
         bot_stats['chats'].add(message.chat.id)
     
+    # Beautiful start message like Resso Music
+    start_text = f"""
+🎵 **THIS IS {BOT_NAME.upper()}!**
+
+🎧 **A FAST & POWERFUL TELEGRAM MUSIC PLAYER BOT WITH SOME AWESOME FEATURES.**
+
+**Supported Platforms:** YouTube, Spotify, Resso, Apple Music and SoundCloud.
+
+⚡ **CLICK ON THE HELP BUTTON TO GET INFORMATION ABOUT MY MODULES AND COMMANDS.**
+"""
+    
     await message.reply_text(
-        f"🎵 **Welcome to {BOT_NAME}!**\n\n"
-        "I can play music in your voice chats!\n\n"
-        "**Basic Commands:**\n"
-        "• `/play <song>` - Play a song\n"
-        "• `/pause` - Pause playback\n"
-        "• `/resume` - Resume playback\n"
-        "• `/skip` - Skip current song\n"
-        "• `/stop` - Stop and clear queue\n"
-        "• `/queue` - Show queue\n"
-        "• `/lyrics <song>` - Get lyrics\n\n"
-        "**More Commands:**\n"
-        "• `/help` - Show all commands\n"
-        "• `/stats` - Bot statistics\n\n"
-        "Add me to your group and start voice chat!",
+        start_text,
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("📢 Support", url="https://t.me/S_o_n_u_783")],
-            [InlineKeyboardButton("ℹ️ Help", callback_data="help_menu")]
+            [InlineKeyboardButton("➕ Add Me In Your Group", url=f"https://t.me/{(await client.get_me()).username}?startgroup=true")],
+            [InlineKeyboardButton("📚 Help And Commands", callback_data="help_main")],
+            [
+                InlineKeyboardButton("👤 Owner", url="https://t.me/s_o_n_u_783"),
+                InlineKeyboardButton("💬 Support", url="https://t.me/bot_hits")
+            ],
+            [InlineKeyboardButton("📢 Channel", url="https://t.me/rythmix_bot_updates")]
         ])
     )
 
@@ -260,7 +284,7 @@ async def play_command(client, message: Message):
     song_info = await download_song(query)
     
     if not song_info:
-        await status_msg.edit_text("❌ Could not find the song!")
+        await status_msg.edit_text("❌ Could not find the song! Please try again later.")
         return
     
     song = Song(
@@ -531,19 +555,201 @@ async def callback_handler(client, callback_query: CallbackQuery):
     data = callback_query.data
     chat_id = callback_query.message.chat.id
     
-    if data == "help_menu":
-        help_text = """
-🎵 **Quick Commands:**
-• `/play` - Play music
-• `/pause` - Pause
-• `/resume` - Resume
-• `/skip` - Skip
-• `/stop` - Stop
-• `/queue` - Show queue
+    # Main Help Menu with Categories
+    if data == "help_main":
+        help_categories = """
+**Chose The Category For Which You Wanna Get Help.**
 
-Type `/help` for all commands!
+**Ask Your Doubts At Support Chat**
+
+**All Commands Can Be Used With : /**
 """
-        await callback_query.message.edit_text(help_text)
+        await callback_query.message.edit_text(
+            help_categories,
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("Admin", callback_data="help_admin"),
+                    InlineKeyboardButton("Auth", callback_data="help_auth"),
+                    InlineKeyboardButton("Broadcast", callback_data="help_broadcast")
+                ],
+                [
+                    InlineKeyboardButton("BL-Chat", callback_data="help_blchat"),
+                    InlineKeyboardButton("BL-Users", callback_data="help_blusers"),
+                    InlineKeyboardButton("C-Play", callback_data="help_cplay")
+                ],
+                [
+                    InlineKeyboardButton("G-Ban", callback_data="help_gban"),
+                    InlineKeyboardButton("Loop", callback_data="help_loop"),
+                    InlineKeyboardButton("Maintenance", callback_data="help_maintenance")
+                ],
+                [
+                    InlineKeyboardButton("Ping", callback_data="help_ping"),
+                    InlineKeyboardButton("Play", callback_data="help_play"),
+                    InlineKeyboardButton("Shuffle", callback_data="help_shuffle")
+                ],
+                [
+                    InlineKeyboardButton("Seek", callback_data="help_seek"),
+                    InlineKeyboardButton("Song", callback_data="help_song"),
+                    InlineKeyboardButton("Speed", callback_data="help_speed")
+                ],
+                [InlineKeyboardButton("🔙 Back", callback_data="start_back")]
+            ])
+        )
+        await callback_query.answer()
+        return
+    
+    # Back to Start Menu
+    elif data == "start_back":
+        start_text = f"""
+🎵 **THIS IS {BOT_NAME.upper()}!**
+
+🎧 **A FAST & POWERFUL TELEGRAM MUSIC PLAYER BOT WITH SOME AWESOME FEATURES.**
+
+**Supported Platforms:** YouTube, Spotify, Resso, Apple Music and SoundCloud.
+
+⚡ **CLICK ON THE HELP BUTTON TO GET INFORMATION ABOUT MY MODULES AND COMMANDS.**
+"""
+        await callback_query.message.edit_text(
+            start_text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("➕ Add Me In Your Group", url=f"https://t.me/{(await client.get_me()).username}?startgroup=true")],
+                [InlineKeyboardButton("📚 Help And Commands", callback_data="help_main")],
+                [
+                    InlineKeyboardButton("👤 Owner", url="https://t.me/s_o_n_u_783"),
+                    InlineKeyboardButton("💬 Support", url="https://t.me/bot_hits")
+                ],
+                [InlineKeyboardButton("📢 Channel", url="https://t.me/rythmix_bot_updates")]
+            ])
+        )
+        await callback_query.answer()
+        return
+    
+    # Help Category - Play
+    elif data == "help_play":
+        play_help = """
+**🎵 Play Commands:**
+
+• `/play <song name>` - Play a song
+• `/play <youtube url>` - Play from URL
+• `/vplay <video name>` - Play video
+• `/pause` - Pause playback
+• `/resume` - Resume playback
+• `/skip` - Skip current song
+• `/stop` - Stop and clear queue
+• `/queue` - Show queue
+• `/nowplaying` - Current song info
+"""
+        await callback_query.message.edit_text(
+            play_help,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data="help_main")]
+            ])
+        )
+        await callback_query.answer()
+        return
+    
+    # Help Category - Admin
+    elif data == "help_admin":
+        admin_help = """
+**👑 Admin Commands:**
+
+• `/pause` - Pause the music
+• `/resume` - Resume the music
+• `/skip` - Skip current song
+• `/stop` - Stop playback
+• `/shuffle` - Shuffle queue
+• `/loop <1-5>` - Loop current song
+• `/seek <seconds>` - Seek position
+"""
+        await callback_query.message.edit_text(
+            admin_help,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data="help_main")]
+            ])
+        )
+        await callback_query.answer()
+        return
+    
+    # Help Category - Ping
+    elif data == "help_ping":
+        ping_help = """
+**🏓 Ping Commands:**
+
+• `/ping` - Check bot latency
+• `/stats` - Bot statistics
+• `/uptime` - Bot uptime
+"""
+        await callback_query.message.edit_text(
+            ping_help,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data="help_main")]
+            ])
+        )
+        await callback_query.answer()
+        return
+    
+    # Help Category - Song
+    elif data == "help_song":
+        song_help = """
+**📥 Song Commands:**
+
+• `/song <song name>` - Download song
+• `/lyrics <song name>` - Get lyrics
+"""
+        await callback_query.message.edit_text(
+            song_help,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data="help_main")]
+            ])
+        )
+        await callback_query.answer()
+        return
+    
+    # Help Category - Broadcast
+    elif data == "help_broadcast":
+        broadcast_help = """
+**📡 Broadcast Commands (Sudo Only):**
+
+• `/broadcast <message>` - Send to all chats
+• `/stats` - Bot statistics
+"""
+        await callback_query.message.edit_text(
+            broadcast_help,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data="help_main")]
+            ])
+        )
+        await callback_query.answer()
+        return
+    
+    # Help Category - Maintenance
+    elif data == "help_maintenance":
+        maintenance_help = """
+**🔧 Maintenance Commands (Sudo Only):**
+
+• `/maintenance on/off` - Toggle maintenance
+• `/reload` - Reload bot modules
+• `/reboot` - Restart bot
+• `/logs` - Get bot logs
+"""
+        await callback_query.message.edit_text(
+            maintenance_help,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data="help_main")]
+            ])
+        )
+        await callback_query.answer()
+        return
+    
+    # Other help categories with placeholder
+    elif data in ["help_auth", "help_blchat", "help_blusers", "help_cplay", "help_gban", "help_loop", "help_shuffle", "help_seek", "help_speed"]:
+        category_name = data.replace("help_", "").upper()
+        await callback_query.message.edit_text(
+            f"**{category_name} Commands:**\n\nComing soon...",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data="help_main")]
+            ])
+        )
         await callback_query.answer()
         return
     
