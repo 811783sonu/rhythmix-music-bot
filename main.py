@@ -37,7 +37,7 @@ queues = defaultdict(list)
 current_playing = {}
 start_time = datetime.now()
 
-# YT-DLP options with better YouTube handling
+# YT-DLP options with Android client to bypass bot detection
 ydl_opts = {
     'format': 'bestaudio/best',
     'outtmpl': 'downloads/%(id)s.%(ext)s',
@@ -46,13 +46,19 @@ ydl_opts = {
     'extract_flat': False,
     'nocheckcertificate': True,
     'geo_bypass': True,
-    'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
-    'cookiefile': None,
+    'age_limit': None,
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['android', 'web'],
+            'skip': ['webpage', 'dash', 'hls']
+        }
+    },
     'http_headers': {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': 'com.google.android.youtube/17.36.4 (Linux; U; Android 12; GB) gzip',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-us,en;q=0.5',
-    },
+        'Sec-Fetch-Mode': 'navigate',
+    }
 }
 
 class Song:
