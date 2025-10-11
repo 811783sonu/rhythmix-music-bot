@@ -4,8 +4,8 @@ import logging
 import sys
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from pytgcalls import PyTgCalls, StreamType
-from pytgcalls.types.input_stream import AudioPiped
+from pytgcalls import PyTgCalls
+from pytgcalls.types import AudioPiped, VideoParameters
 from pytgcalls.types.input_stream.quality import HighQualityAudio
 from pytgcalls.exceptions import NoActiveGroupCall, AlreadyJoinedError
 import yt_dlp
@@ -228,8 +228,7 @@ async def play_next(chat_id):
             try:
                 await pytgcalls.play(
                     chat_id,
-                    AudioPiped(song.url, HighQualityAudio()),
-                    stream_type=StreamType().pulse_stream
+                    AudioPiped(song.url, HighQualityAudio())
                 )
                 return song
             except AlreadyJoinedError:
