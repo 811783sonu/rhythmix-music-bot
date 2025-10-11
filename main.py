@@ -5,7 +5,7 @@ import sys
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pytgcalls import PyTgCalls
-from pytgcalls.types import AudioPiped, VideoParameters
+from pytgcalls.types.input_stream import AudioPiped, InputAudioStream
 from pytgcalls.types.input_stream.quality import HighQualityAudio
 from pytgcalls.exceptions import NoActiveGroupCall, AlreadyJoinedError
 import yt_dlp
@@ -226,17 +226,33 @@ async def play_next(chat_id):
             bot_stats['played'] += 1
             
             try:
+                # Join voice chat first if not already joined
                 await pytgcalls.play(
                     chat_id,
                     AudioPiped(song.url, HighQualityAudio())
                 )
+                logger.info(f"Started playing in {chat_id}")
                 return song
             except AlreadyJoinedError:
+                # Already in call, just change the stream
                 await pytgcalls.change_stream(
                     chat_id,
                     AudioPiped(song.url, HighQualityAudio())
                 )
+                logger.info(f"Changed stream in {chat_id}")
                 return song
+            except Exception as e:
+                logger.error(f"Error starting playback: {e}")
+                # Try to join the call first
+                try:
+                    await pytgcalls.join_group_call(
+                        chat_id,
+                        AudioPiped(song.url, HighQualityAudio())
+                    )
+                    return song
+                except Exception as join_error:
+                    logger.error(f"Failed to join call: {join_error}")
+                    return None
         else:
             current_playing.pop(chat_id, None)
             try:
@@ -245,7 +261,7 @@ async def play_next(chat_id):
                 pass
             return None
     except Exception as e:
-        logger.error(f"Play next error: {e}")
+        logger.error(f"Play next error: {e}", exc_info=True)
         return None
 
 @pytgcalls.on_stream_end()
@@ -324,6 +340,40 @@ async def help_command(client, message: Message):
 
 # ============= MUSIC COMMANDS =============
 
+@app.on_message(filters.command("join") & ~filters.private)
+async def join_command(client, message: Message):
+    """Join voice chat"""
+    chat_id = message.chat.id
+    
+    if not await is_admin(chat_id, message.from_user.id):
+        await message.reply_text("❌ **Only admins can use this!**")
+        return
+    
+    try:
+        # Just join the call without playing
+        await message.reply_text("🔄 **Joining voice chat...**")
+        # We'll join when first song is played
+        await message.reply_text("✅ **Ready to play music!**\nUse `/play <song name>` to start.")
+    except Exception as e:
+        await message.reply_text(f"❌ **Error:** {str(e)}")
+
+@app.on_message(filters.command("leave") & ~filters.private)
+async def leave_command(client, message: Message):
+    """Leave voice chat"""
+    chat_id = message.chat.id
+    
+    if not await is_admin(chat_id, message.from_user.id):
+        await message.reply_text("❌ **Only admins can use this!**")
+        return
+    
+    try:
+        await pytgcalls.leave_group_call(chat_id)
+        queues[chat_id].clear()
+        current_playing.pop(chat_id, None)
+        await message.reply_text("👋 **Left voice chat!**")
+    except Exception as e:
+        await message.reply_text(f"❌ **Error:** {str(e)}")
+
 @app.on_message(filters.command(["play", "p"]) & ~filters.private)
 async def play_command(client, message: Message):
     """Play music"""
@@ -346,7 +396,13 @@ async def play_command(client, message: Message):
     bot_stats['chats'].add(chat_id)
     
     if len(message.command) < 2 and not message.reply_to_message:
-        await message.reply_text("❌ **Usage:** `/play <song name or URL>`\n\n**Example:**\n`/play faded`\n`/play https://youtu.be/xxxxx`")
+        await message.reply_text(
+            "❌ **Usage:** `/play <song name or URL>`\n\n"
+            "**Example:**\n"
+            "`/play faded`\n"
+            "`/play https://youtu.be/xxxxx`\n\n"
+            "**Note:** Make sure voice chat is started first!"
+        )
         return
     
     query = message.text.split(None, 1)[1] if len(message.command) > 1 else "audio"
@@ -385,6 +441,8 @@ async def play_command(client, message: Message):
         
         if chat_id not in current_playing:
             logger.info(f"Starting playback for {chat_id}")
+            await status_msg.edit_text("🎵 **Joining voice chat and playing...**")
+            
             playing_song = await play_next(chat_id)
             if playing_song:
                 await status_msg.edit_text(
@@ -399,10 +457,11 @@ async def play_command(client, message: Message):
             else:
                 await status_msg.edit_text(
                     "❌ **Failed to play!**\n\n"
-                    "**Make sure:**\n"
-                    "• Bot is admin in the group\n"
-                    "• Voice chat is active\n"
-                    "• Bot has permission to manage voice chats"
+                    "**Checklist:**\n"
+                    "✓ Is voice chat started?\n"
+                    "✓ Is bot admin in the group?\n"
+                    "✓ Does bot have 'Manage Voice Chats' permission?\n\n"
+                    "**Try:** Start voice chat first, then use `/play`"
                 )
         else:
             position = len(queues[chat_id])
@@ -417,8 +476,11 @@ async def play_command(client, message: Message):
         logger.error(f"Play command error: {e}", exc_info=True)
         await status_msg.edit_text(
             f"❌ **Error occurred!**\n\n"
-            f"**Details:** {str(e)[:100]}\n\n"
-            "Please try again or contact support."
+            f"**Details:** {str(e)[:200]}\n\n"
+            "**Common fixes:**\n"
+            "• Start voice chat first\n"
+            "• Make bot admin\n"
+            "• Give 'Manage Voice Chats' permission"
         )
 
 @app.on_message(filters.command("pause") & ~filters.private)
