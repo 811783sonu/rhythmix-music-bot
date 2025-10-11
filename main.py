@@ -49,26 +49,41 @@ blocked_chats = set()
 gbanned_users = set()
 
 # YT-DLP options - FIXED FOR BOT DETECTION
-ydl_opts = {
-    'format': 'bestaudio/best',
-    'outtmpl': 'downloads/%(id)s.%(ext)s',
-    'quiet': True,
-    'no_warnings': True,
-    'extract_flat': False,
-    'nocheckcertificate': True,
-    'geo_bypass': True,
-    'cookiefile': 'cookies.txt',
-    'extractor_args': {
-        'youtube': {
-            'player_client': ['android', 'web'],
+def get_ydl_opts():
+    """Get YT-DLP options with optional cookies"""
+    opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': 'downloads/%(id)s.%(ext)s',
+        'quiet': True,
+        'no_warnings': True,
+        'extract_flat': False,
+        'nocheckcertificate': True,
+        'geo_bypass': True,
+        'ignoreerrors': True,
+        'no_check_certificate': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'web', 'ios'],
+                'skip': ['hls', 'dash']
+            }
+        },
+        'http_headers': {
+            'User-Agent': 'com.google.android.youtube/17.36.4 (Linux; U; Android 12; US) gzip',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-us,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Referer': 'https://www.youtube.com/',
         }
-    },
-    'http_headers': {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-us,en;q=0.5',
     }
-}
+    
+    # Add cookies if file exists
+    if os.path.exists('cookies.txt'):
+        opts['cookiefile'] = 'cookies.txt'
+        logger.info("Using cookies.txt for YouTube")
+    else:
+        logger.warning("cookies.txt not found, proceeding without cookies")
+    
+    return opts
 
 class Song:
     def __init__(self, title, duration, url, thumbnail, requester, platform="YouTube"):
@@ -102,21 +117,50 @@ async def download_song(query):
     for attempt in range(max_retries):
         try:
             if attempt > 0:
-                await asyncio.sleep(3 * attempt)
+                logger.info(f"Retry attempt {attempt + 1}/{max_retries}")
+                await asyncio.sleep(2 * attempt)
+            
+            ydl_opts = get_ydl_opts()
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                # Format query for search
                 if not query.startswith('http'):
-                    query = f"ytsearch:{query}"
+                    query = f"ytsearch1:{query}"
                 
+                logger.info(f"Searching for: {query}")
                 info = ydl.extract_info(query, download=False)
                 
+                if not info:
+                    logger.error("No info returned from yt-dlp")
+                    continue
+                
+                # Handle search results
                 if 'entries' in info:
+                    if not info['entries']:
+                        logger.error("No search results found")
+                        continue
                     info = info['entries'][0]
                 
-                audio_url = info['url']
-                title = info.get('title', 'Unknown')
+                # Get audio URL
+                if 'url' not in info and 'formats' in info:
+                    # Find best audio format
+                    audio_formats = [f for f in info['formats'] if f.get('acodec') != 'none']
+                    if audio_formats:
+                        info['url'] = audio_formats[0]['url']
+                    else:
+                        logger.error("No audio formats found")
+                        continue
+                
+                audio_url = info.get('url')
+                if not audio_url:
+                    logger.error("No audio URL found")
+                    continue
+                
+                title = info.get('title', 'Unknown Title')
                 duration = info.get('duration', 0)
                 thumbnail = info.get('thumbnail', '')
+                
+                logger.info(f"Successfully extracted: {title}")
                 
                 return {
                     'title': title,
@@ -126,12 +170,27 @@ async def download_song(query):
                 }
                 
         except Exception as e:
-            logger.error(f"Download error (attempt {attempt + 1}/{max_retries}): {e}")
-            if "Sign in to confirm" in str(e):
+            error_msg = str(e)
+            logger.error(f"Download error (attempt {attempt + 1}/{max_retries}): {error_msg}")
+            
+            # Check for specific errors
+            if "Sign in to confirm" in error_msg or "bot" in error_msg.lower():
+                logger.warning("Bot detection triggered!")
                 if attempt < max_retries - 1:
                     continue
-            return None
+                else:
+                    logger.error("Failed due to bot detection after all retries")
+            elif "not available" in error_msg.lower():
+                logger.error("Video not available")
+                return None
+            elif "private" in error_msg.lower():
+                logger.error("Video is private")
+                return None
+            
+            if attempt < max_retries - 1:
+                continue
     
+    logger.error("Failed after all retry attempts")
     return None
 
 def format_duration(seconds):
@@ -288,17 +347,31 @@ async def play_command(client, message: Message):
     bot_stats['chats'].add(chat_id)
     
     if len(message.command) < 2 and not message.reply_to_message:
-        await message.reply_text("❌ **Usage:** `/play <song name or URL>`")
+        await message.reply_text("❌ **Usage:** `/play <song name or URL>`\n\n**Example:**\n`/play faded`\n`/play https://youtu.be/xxxxx`")
         return
     
     query = message.text.split(None, 1)[1] if len(message.command) > 1 else "audio"
     status_msg = await message.reply_text("🔍 **Searching...**")
     
     try:
+        logger.info(f"Play request from {user_id} in {chat_id}: {query}")
+        
         song_info = await download_song(query)
         
         if not song_info:
-            await status_msg.edit_text("❌ **Could not find the song!**\nPlease try again or use a different query.")
+            error_text = (
+                "❌ **Could not find or play the song!**\n\n"
+                "**Possible reasons:**\n"
+                "• Video is not available or private\n"
+                "• Age-restricted content\n"
+                "• Geographic restrictions\n"
+                "• YouTube bot detection\n\n"
+                "**Try:**\n"
+                "• Using a different song name\n"
+                "• Using a direct YouTube URL\n"
+                "• Trying again in a few minutes"
+            )
+            await status_msg.edit_text(error_text)
             return
         
         song = Song(
@@ -312,6 +385,7 @@ async def play_command(client, message: Message):
         queues[chat_id].append(song)
         
         if chat_id not in current_playing:
+            logger.info(f"Starting playback for {chat_id}")
             playing_song = await play_next(chat_id)
             if playing_song:
                 await status_msg.edit_text(
@@ -324,7 +398,13 @@ async def play_command(client, message: Message):
                     disable_web_page_preview=True
                 )
             else:
-                await status_msg.edit_text("❌ **Failed to play!**\nMake sure bot is admin and voice chat is active.")
+                await status_msg.edit_text(
+                    "❌ **Failed to play!**\n\n"
+                    "**Make sure:**\n"
+                    "• Bot is admin in the group\n"
+                    "• Voice chat is active\n"
+                    "• Bot has permission to manage voice chats"
+                )
         else:
             position = len(queues[chat_id])
             await status_msg.edit_text(
@@ -335,8 +415,12 @@ async def play_command(client, message: Message):
                 disable_web_page_preview=True
             )
     except Exception as e:
-        logger.error(f"Play error: {e}")
-        await status_msg.edit_text(f"❌ **Error:** {str(e)}")
+        logger.error(f"Play command error: {e}", exc_info=True)
+        await status_msg.edit_text(
+            f"❌ **Error occurred!**\n\n"
+            f"**Details:** {str(e)[:100]}\n\n"
+            "Please try again or contact support."
+        )
 
 @app.on_message(filters.command("pause") & ~filters.private)
 async def pause_command(client, message: Message):
