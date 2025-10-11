@@ -1,7 +1,7 @@
 pyrogram
 tgcrypto
 py-tgcalls
-yt-dlp>=2024.12.23
+yt-dlp
 aiohttp
 psutil
 python-dotenv
