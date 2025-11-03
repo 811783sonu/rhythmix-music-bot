@@ -7,14 +7,18 @@ from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, 
 from pytgcalls import PyTgCalls
 from pytgcalls.types.input_stream import AudioPiped
 from pytgcalls.types.input_stream.quality import HighQualityAudio
-from pytgcalls.exceptions import NoActiveGroupCall, AlreadyJoinedError, NotInGroupCallError
+from pytgcalls.exceptions import NoActiveGroupCall, AlreadyJoinedError, NotInGroupCallError, NotInGroupCallError
 import yt_dlp
 import aiohttp
 from collections import defaultdict
 from datetime import datetime
 import psutil
 from config import API_ID, API_HASH, BOT_TOKEN, BOT_NAME, SUDO_USERS
-from health_server import health_server
+from health_server import health_server 
+# NOTE: Ensure 'config.py' and 'health_server.py' are present in your environment.
+# 🚨 CRITICAL: Ensure FFmpeg is installed and accessible on your server for streaming!
+
+# --- Configuration and Initialization ---
 
 # Configure logging
 logging.basicConfig(
@@ -51,13 +55,14 @@ gbanned_users = set()
 
 # YT-DLP options
 def get_ydl_opts():
-    """Get YT-DLP options with optional cookies"""
+    """Get YT-DLP options with optional cookies and stability features"""
     opts = {
         'format': 'bestaudio/best',
         'outtmpl': 'downloads/%(id)s.%(ext)s',
         'quiet': True,
         'no_warnings': True,
-        'extract_flat': False,
+        'extract_flat': True,
+        'noplaylist': True, # Prevents long delays from accidentally extracting playlists
         'nocheckcertificate': True,
         'geo_bypass': True,
         'ignoreerrors': True,
@@ -70,6 +75,7 @@ def get_ydl_opts():
             }
         },
         'http_headers': {
+            # Use a robust User-Agent to help get stable direct stream URLs
             'User-Agent': 'com.google.android.youtube/17.36.4 (Linux; U; Android 12; US) gzip',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'en-us,en;q=0.5',
@@ -96,7 +102,7 @@ def is_sudo(user_id):
     return user_id in SUDO_USERS
 
 async def is_admin(chat_id, user_id):
-    """Check if user is admin"""
+    """Check if user is admin or authorized user"""
     if is_sudo(user_id):
         return True
     if user_id in auth_users[chat_id]:
@@ -108,44 +114,38 @@ async def is_admin(chat_id, user_id):
         return False
 
 async def download_song(query):
-    """Download and extract audio info"""
+    """Download and extract audio info with error handling"""
     max_retries = 2
     
     for attempt in range(max_retries):
         try:
             if attempt > 0:
-                logger.info(f"Retry attempt {attempt + 1}/{max_retries}")
+                logger.info(f"Retry attempt {attempt + 1}/{max_retries} for query: {query}")
                 await asyncio.sleep(2)
             
             ydl_opts = get_ydl_opts()
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                if not query.startswith('http'):
+                if not query.startswith(('http', 'https')):
                     query = f"ytsearch1:{query}"
                 
-                logger.info(f"Extracting: {query}")
+                logger.info(f"Extracting info for: {query}")
                 info = ydl.extract_info(query, download=False)
                 
                 if not info:
+                    logger.warning("YT-DLP extracted no information.")
                     continue
                 
                 if 'entries' in info:
                     if not info['entries']:
+                        logger.warning("YT-DLP search returned no entries.")
                         continue
                     info = info['entries'][0]
                 
-                # Get the best audio URL
-                audio_url = None
-                if 'url' in info:
-                    audio_url = info['url']
-                elif 'formats' in info:
-                    for fmt in info['formats']:
-                        if fmt.get('acodec') != 'none' and fmt.get('vcodec') == 'none':
-                            audio_url = fmt['url']
-                            break
+                audio_url = info.get('url')
                 
                 if not audio_url:
-                    logger.error("No audio URL found")
+                    logger.error("No audio URL found in extracted info.")
                     continue
                 
                 title = info.get('title', 'Unknown')
@@ -162,9 +162,9 @@ async def download_song(query):
                 }
                 
         except Exception as e:
-            logger.error(f"Download error: {e}")
-            if attempt < max_retries - 1:
-                continue
+            logger.error(f"Download/Extraction error for {query} (Attempt {attempt + 1}): {e}", exc_info=True)
+            if attempt == max_retries - 1:
+                return None
     
     return None
 
@@ -193,64 +193,68 @@ def get_control_buttons():
     ])
 
 async def play_next(chat_id):
-    """Play next song"""
+    """Play next song in the queue with error handling"""
     try:
         if chat_id in queues and queues[chat_id]:
             song = queues[chat_id].pop(0)
             current_playing[chat_id] = song
             bot_stats['played'] += 1
             
-            logger.info(f"Playing: {song.title} in {chat_id}")
+            logger.info(f"Attempting to play: {song.title} in {chat_id}")
             
-            # Create audio stream
+            # Create audio stream (relies on FFmpeg)
             audio_stream = AudioPiped(
                 song.url,
                 HighQualityAudio()
             )
             
             try:
-                # Try to play
-                await pytgcalls.play(
-                    chat_id,
-                    audio_stream
-                )
-                logger.info(f"Successfully started playing in {chat_id}")
+                # Try to join and play
+                await pytgcalls.play(chat_id, audio_stream)
+                logger.info(f"Successfully started playing {song.title} in {chat_id}")
                 return song
                 
             except AlreadyJoinedError:
-                # Already in call, change stream
-                logger.info(f"Already in call, changing stream")
-                await pytgcalls.change_stream(
-                    chat_id,
-                    audio_stream
-                )
+                # Bot is already in call, change stream
+                await pytgcalls.change_stream(chat_id, audio_stream)
+                logger.info(f"Changed stream to {song.title} in {chat_id}")
                 return song
                 
             except NoActiveGroupCall:
-                logger.error(f"No active voice chat in {chat_id}")
+                logger.error(f"No active voice chat found in {chat_id}. Cannot play.")
+                # Put the song back and stop attempting to play
+                queues[chat_id].insert(0, song)
+                current_playing.pop(chat_id, None)
                 return None
                 
             except Exception as e:
-                logger.error(f"Play error: {e}", exc_info=True)
+                # Catch streaming/FFmpeg errors
+                logger.error(f"Critical PyTgCalls play/change_stream error in {chat_id}: {e}", exc_info=True)
+                current_playing.pop(chat_id, None)
                 return None
         else:
-            # Queue empty
+            # Queue empty, leave VC
             current_playing.pop(chat_id, None)
+            logger.info(f"Queue empty in {chat_id}. Leaving voice chat.")
             try:
                 await pytgcalls.leave_group_call(chat_id)
-            except:
-                pass
+            except NotInGroupCallError:
+                 logger.warning(f"Tried to leave {chat_id} but bot was not in call.")
+            except Exception as e:
+                logger.error(f"Error leaving group call in {chat_id}: {e}")
             return None
             
     except Exception as e:
-        logger.error(f"Play next error: {e}", exc_info=True)
+        logger.critical(f"Unexpected error in play_next function for {chat_id}: {e}", exc_info=True)
         return None
+
+# --- PyTgCalls Handler ---
 
 @pytgcalls.on_stream_end()
 async def stream_end_handler(client, update):
-    """Handle stream end"""
+    """Handle stream end to play the next song"""
     chat_id = update.chat_id
-    logger.info(f"Stream ended in {chat_id}")
+    logger.info(f"Stream ended in {chat_id}. Playing next...")
     song = await play_next(chat_id)
     
     if song:
@@ -260,14 +264,14 @@ async def stream_end_handler(client, update):
                 f"🎵 **Now Playing:**\n📀 {song.title}",
                 reply_markup=get_control_buttons()
             )
-        except:
-            pass
+        except Exception as e:
+             logger.error(f"Error sending 'Now Playing' message in {chat_id}: {e}")
 
-# ============= BASIC COMMANDS =============
+# --- Pyrogram Command Handlers ---
 
 @app.on_message(filters.command("start"))
 async def start_command(client, message: Message):
-    """Start command"""
+    """Start command (Resso removed)"""
     bot_stats['users'].add(message.from_user.id)
     if message.chat.type != "private":
         bot_stats['chats'].add(message.chat.id)
@@ -277,15 +281,17 @@ async def start_command(client, message: Message):
 
 🎧 **A FAST & POWERFUL TELEGRAM MUSIC PLAYER BOT WITH SOME AWESOME FEATURES.**
 
-**Supported Platforms:** YouTube, Spotify, Resso, Apple Music and SoundCloud.
+**Supported Platforms:** **YouTube, Spotify, Apple Music and SoundCloud.**
 
 ⚡ **CLICK ON THE HELP BUTTON TO GET INFORMATION ABOUT MY MODULES AND COMMANDS.**
 """
     
+    bot_username = (await client.get_me()).username
+    
     await message.reply_text(
         start_text,
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("➕ Add Me In Your Group", url=f"https://t.me/{(await client.get_me()).username}?startgroup=true")],
+            [InlineKeyboardButton("➕ Add Me In Your Group", url=f"https://t.me/{bot_username}?startgroup=true")],
             [InlineKeyboardButton("📚 Help And Commands", callback_data="help_main")],
             [
                 InlineKeyboardButton("👤 Owner", url="https://t.me/s_o_n_u_783"),
@@ -313,8 +319,6 @@ async def help_command(client, message: Message):
             ]
         ])
     )
-
-# ============= MUSIC COMMANDS =============
 
 @app.on_message(filters.command(["play", "p"]) & ~filters.private)
 async def play_command(client, message: Message):
@@ -344,14 +348,14 @@ async def play_command(client, message: Message):
         return
     
     query = message.text.split(None, 1)[1]
-    status_msg = await message.reply_text("🔍 **Searching...**")
+    status_msg = await message.reply_text("🔍 **Searching and Preparing Stream...**")
     
     try:
         song_info = await download_song(query)
         
         if not song_info:
             await status_msg.edit_text(
-                "❌ **Could not find the song!**\n\n"
+                "❌ **Could not find or process the song!**\n\n"
                 "**Try:**\n"
                 "• Different song name\n"
                 "• YouTube URL\n"
@@ -367,10 +371,11 @@ async def play_command(client, message: Message):
             requester=message.from_user.mention
         )
         
+        is_playing = chat_id in current_playing
         queues[chat_id].append(song)
         
-        if chat_id not in current_playing:
-            await status_msg.edit_text("🎵 **Processing...**")
+        if not is_playing:
+            await status_msg.edit_text("🎵 **Joining Voice Chat and Starting Playback...**")
             playing_song = await play_next(chat_id)
             
             if playing_song:
@@ -399,10 +404,10 @@ async def play_command(client, message: Message):
             )
             
     except Exception as e:
-        logger.error(f"Play error: {e}", exc_info=True)
+        logger.error(f"Play command final error: {e}", exc_info=True)
         await status_msg.edit_text(
-            f"❌ **Error!**\n\n"
-            f"{str(e)[:150]}\n\n"
+            f"❌ **An unexpected error occurred!**\n\n"
+            f"Error: `{str(e)[:150]}`\n\n"
             "Contact support if this persists."
         )
 
@@ -412,12 +417,11 @@ async def pause_command(client, message: Message):
     if not await is_admin(message.chat.id, message.from_user.id):
         await message.reply_text("❌ **Only admins!**")
         return
-    
     try:
         await pytgcalls.pause_stream(message.chat.id)
         await message.reply_text("⏸ **Paused!**")
     except Exception as e:
-        await message.reply_text(f"❌ {str(e)}")
+        await message.reply_text(f"❌ **Error pausing:** {str(e)}")
 
 @app.on_message(filters.command("resume") & ~filters.private)
 async def resume_command(client, message: Message):
@@ -425,12 +429,11 @@ async def resume_command(client, message: Message):
     if not await is_admin(message.chat.id, message.from_user.id):
         await message.reply_text("❌ **Only admins!**")
         return
-    
     try:
         await pytgcalls.resume_stream(message.chat.id)
         await message.reply_text("▶️ **Resumed!**")
     except Exception as e:
-        await message.reply_text(f"❌ {str(e)}")
+        await message.reply_text(f"❌ **Error resuming:** {str(e)}")
 
 @app.on_message(filters.command(["skip", "next"]) & ~filters.private)
 async def skip_command(client, message: Message):
@@ -438,10 +441,9 @@ async def skip_command(client, message: Message):
     if not await is_admin(message.chat.id, message.from_user.id):
         await message.reply_text("❌ **Only admins!**")
         return
-    
     chat_id = message.chat.id
-    
     if chat_id in current_playing:
+        await message.reply_text("⏭ **Skipping to next song...**")
         song = await play_next(chat_id)
         if song:
             await message.reply_text(
@@ -459,37 +461,32 @@ async def stop_command(client, message: Message):
     if not await is_admin(message.chat.id, message.from_user.id):
         await message.reply_text("❌ **Only admins!**")
         return
-    
     chat_id = message.chat.id
-    
     try:
         await pytgcalls.leave_group_call(chat_id)
         queues[chat_id].clear()
         current_playing.pop(chat_id, None)
-        await message.reply_text("⏹ **Stopped!**")
+        await message.reply_text("⏹ **Stopped and cleared queue!**")
     except Exception as e:
-        await message.reply_text(f"❌ {str(e)}")
+        await message.reply_text(f"❌ **Error stopping:** {str(e)}")
 
 @app.on_message(filters.command("queue") & ~filters.private)
 async def queue_command(client, message: Message):
     """Queue"""
     chat_id = message.chat.id
-    
     if chat_id not in current_playing and not queues[chat_id]:
         await message.reply_text("📭 **Queue empty!**")
         return
-    
     text = "📃 **Queue:**\n\n"
-    
     if chat_id in current_playing:
         song = current_playing[chat_id]
-        text += f"▶️ **Playing:**\n{song.title}\n\n"
-    
+        text += f"▶️ **Playing:**\n`{song.title}`\n\n"
     if queues[chat_id]:
         text += "**Next:**\n"
         for i, song in enumerate(queues[chat_id][:10], 1):
-            text += f"{i}. {song.title}\n"
-    
+            text += f"{i}. `{song.title}`\n"
+        if len(queues[chat_id]) > 10:
+             text += f"*{len(queues[chat_id]) - 10} more songs in queue...*"
     await message.reply_text(text)
 
 @app.on_message(filters.command("ping"))
@@ -499,11 +496,10 @@ async def ping_command(client, message: Message):
     msg = await message.reply_text("🏓 Pinging...")
     end = datetime.now()
     ms = (end - start).microseconds / 1000
-    
     await msg.edit_text(
         f"🏓 **Pong!**\n"
-        f"⚡ {ms:.2f}ms\n"
-        f"⏰ Uptime: {str(datetime.now() - start_time).split('.')[0]}"
+        f"⚡ `{ms:.2f}ms`\n"
+        f"⏰ Uptime: `{str(datetime.now() - start_time).split('.')[0]}`"
     )
 
 @app.on_message(filters.command("stats"))
@@ -517,7 +513,7 @@ async def stats_command(client, message: Message):
         f"🔧 Active: {len(current_playing)}"
     )
 
-# Callback handler (simplified)
+# Callback handler
 @app.on_callback_query()
 async def callback_handler(client, callback_query: CallbackQuery):
     """Handle callbacks"""
@@ -530,8 +526,17 @@ async def callback_handler(client, callback_query: CallbackQuery):
             "**Choose Category:**",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("Play", callback_data="help_play")],
+                [InlineKeyboardButton("Admin", callback_data="help_admin")],
                 [InlineKeyboardButton("🔙 Back", callback_data="start_back")]
             ])
+        )
+    elif data == "help_admin":
+        await callback_query.message.edit_text(
+            "**👑 Admin Commands:**\n\n"
+            "• `/auth <user>` - Add user to admin list\n"
+            "• `/unauth <user>` - Remove user from admin list\n"
+            "• `/maint <on|off>` - Maintenance mode (Sudo only)",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="help_main")]])
         )
     elif data == "start_back":
         await start_command(client, callback_query.message)
@@ -546,63 +551,57 @@ async def callback_handler(client, callback_query: CallbackQuery):
             "• `/queue` - Queue",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="help_main")]])
         )
-    elif data == "pause":
-        if await is_admin(chat_id, user_id):
-            try:
+    
+    # Inline Control Buttons Logic
+    elif data in ["pause", "resume", "skip", "stop"]:
+        if not await is_admin(chat_id, user_id):
+            await callback_query.answer("❌ Admins only!", show_alert=True)
+            return
+
+        try:
+            if data == "pause":
                 await pytgcalls.pause_stream(chat_id)
                 await callback_query.answer("⏸ Paused!")
-            except:
-                await callback_query.answer("❌ Error!", show_alert=True)
-        else:
-            await callback_query.answer("❌ Admins only!", show_alert=True)
-    
-    elif data == "resume":
-        if await is_admin(chat_id, user_id):
-            try:
+            elif data == "resume":
                 await pytgcalls.resume_stream(chat_id)
                 await callback_query.answer("▶️ Resumed!")
-            except:
-                await callback_query.answer("❌ Error!", show_alert=True)
-        else:
-            await callback_query.answer("❌ Admins only!", show_alert=True)
-    
-    elif data == "skip":
-        if await is_admin(chat_id, user_id):
-            if chat_id in current_playing:
+            elif data == "skip":
                 song = await play_next(chat_id)
                 if song:
                     await callback_query.message.edit_text(
                         f"⏭ **Skipped!**\n\n🎵 {song.title}",
                         reply_markup=get_control_buttons()
                     )
-                    await callback_query.answer()
+                    await callback_query.answer("⏭ Skipped!")
                 else:
                     await callback_query.answer("✅ Queue finished!", show_alert=True)
-        else:
-            await callback_query.answer("❌ Admins only!", show_alert=True)
-    
-    elif data == "stop":
-        if await is_admin(chat_id, user_id):
-            try:
+            elif data == "stop":
                 await pytgcalls.leave_group_call(chat_id)
                 queues[chat_id].clear()
                 current_playing.pop(chat_id, None)
                 await callback_query.message.edit_text("⏹ **Stopped!**")
-                await callback_query.answer()
-            except:
-                await callback_query.answer("❌ Error!", show_alert=True)
-        else:
-            await callback_query.answer("❌ Admins only!", show_alert=True)
+                await callback_query.answer("⏹ Stopped!")
+        except Exception as e:
+             logger.error(f"Callback error for {data} in {chat_id}: {e}")
+             await callback_query.answer(f"❌ Error: {str(e)[:50]}", show_alert=True)
+    
+    elif data == "queue":
+        await callback_query.answer("Opening Queue...", show_alert=False)
+        await queue_command(client, callback_query.message)
+
 
 async def main():
-    """Main"""
+    """Main function to start clients"""
     os.makedirs("downloads", exist_ok=True)
     
-    await health_server.start()
+    await health_server.start() # Start custom health server
     await pytgcalls.start()
+    await app.start() # Start Pyrogram client
+    
     logger.info(f"{BOT_NAME} started!")
     
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
     app.run(main())
+    
